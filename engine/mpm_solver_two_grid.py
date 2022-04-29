@@ -12,7 +12,7 @@ USE_IN_BLENDER = False
 
 
 @ti.data_oriented
-class MPMSolver:
+class MPMSolverTwoGrid:
     material_water = 0
     material_elastic = 1
     material_snow = 2
@@ -360,6 +360,9 @@ class MPMSolver:
     @ti.kernel
     def g2p2g(self, dt: ti.f32, pid: ti.template(), grid_v_in: ti.template(),
               grid_v_out: ti.template(), grid_m_out: ti.template()):
+
+        print("using g2p2g")
+        
         ti.block_dim(256)
         ti.no_activate(self.particle)
         if ti.static(self.use_bls):
@@ -483,6 +486,9 @@ class MPMSolver:
 
     @ti.kernel
     def p2g(self, dt: ti.f32):
+
+        print("using p2g")
+
         ti.no_activate(self.particle)
         ti.block_dim(256)
         if ti.static(self.use_bls):
