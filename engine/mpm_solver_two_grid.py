@@ -358,23 +358,31 @@ class MPMSolverTwoGrid:
             ti.append(pid.parent(), base_pid, p)
 
     @ti.kernel
-    def g2p2g(self, dt: ti.f32, pid: ti.template(), grid_v_in: ti.template(),
-              grid_v_out: ti.template(), grid_m_out: ti.template()):
+    def g2p2g(self, dt: ti.f32, pid: ti.template(), grid_v_in_sand: ti.template(),
+              grid_v_out_sand: ti.template(), grid_m_out_sand: ti.template(), grid_v_in_water: ti.template(),
+              grid_v_out_water: ti.template(), grid_m_out_water: ti.template()):
 
         print("using g2p2g")
-        
+
         ti.block_dim(256)
         ti.no_activate(self.particle)
         if ti.static(self.use_bls):
-            ti.block_local(grid_m_out)
+
+            ti.block_local(grid_m_out_sand)
             for d in ti.static(range(self.dim)):
-                ti.block_local(grid_v_in.get_scalar_field(d))
-                ti.block_local(grid_v_out.get_scalar_field(d))
+                ti.block_local(grid_v_in_sand.get_scalar_field(d))
+                ti.block_local(grid_v_out_sand.get_scalar_field(d))
+
+            ti.block_local(grid_m_out_water)
+            for d in ti.static(range(self.dim)):
+                ti.block_local(grid_v_in_water.get_scalar_field(d))
+                ti.block_local(grid_v_out_water.get_scalar_field(d))
+
         for I in ti.grouped(pid):
             p = pid[I]
             # G2P
             base = ti.floor(self.x[p] * self.inv_dx - 0.5).cast(int)
-            Im = ti.rescale_index(pid, grid_m_out, I)
+            Im = ti.rescale_index(pid, grid_m_out_sand, I)
             for D in ti.static(range(self.dim)):
                 base[D] = ti.assume_in_range(base[D], Im[D], 0, 1)
             fx = self.x[p] * self.inv_dx - base.cast(float)
@@ -386,7 +394,7 @@ class MPMSolverTwoGrid:
             # Loop over 3x3 grid node neighborhood
             for offset in ti.static(ti.grouped(self.stencil_range())):
                 dpos = offset.cast(float) - fx
-                g_v = grid_v_in[base + offset]
+                g_v = grid_v_in_sand[base + offset]
                 weight = 1.0
                 for d in ti.static(range(self.dim)):
                     weight *= w[offset[d]][d]
@@ -477,10 +485,10 @@ class MPMSolverTwoGrid:
                 weight = 1.0
                 for d in ti.static(range(self.dim)):
                     weight *= w2[offset[d]][d]
-                grid_v_out[base +
+                grid_v_out_sand[base +
                            offset] += weight * (self.p_mass * self.v[p] +
                                                 affine @ dpos)
-                grid_m_out[base + offset] += weight * self.p_mass
+                grid_m_out_sand[base + offset] += weight * self.p_mass
 
         self.last_time_final_particles[None] = self.n_particles[None]
 
