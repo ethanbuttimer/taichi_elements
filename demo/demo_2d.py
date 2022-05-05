@@ -23,9 +23,9 @@ if write_to_disk:
 
 ti.init(arch=ti.cuda)  # Try to run on GPU
 
-gui = ti.GUI("Taichi Elements", res=512, background_color=0x112F41)
+gui = ti.GUI("Taichi Elements", res=1024, background_color=0x112F41)
 
-mpm = MPMSolver(res=(128, 128))
+mpm = MPMSolver(res=(128, 128))#, use_g2p2g=True)
 
 for i in range(3):
     mpm.add_cube(lower_corner=[0.2 + i * 0.1, 0.3 + i * 0.1],

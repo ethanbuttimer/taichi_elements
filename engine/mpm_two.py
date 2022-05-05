@@ -415,22 +415,16 @@ class MPMSolver:
                 ti.block_local(grid_v_out.get_scalar_field(d))
         for I in ti.grouped(pid):
             p = pid[I]
-            #print("p: ", p)
-            #print("I: ", I)
+
             # G2P
             #base: grid cell location of the particle in xy(z)
             base = ti.floor(self.x[p] * self.inv_dx - 0.5).cast(int)
-            #print("base1: ", base)
             Im = ti.rescale_index(pid, grid_m_out, I)
-            #print("Im: ", Im)
             for D in ti.static(range(self.dim)):
                 base[D] = ti.assume_in_range(base[D], Im[D], 0, 1)
 
-            #print("base2: ", base)
-
             #offset within grid cell
             fx = self.x[p] * self.inv_dx - base.cast(float)
-            #print("fx: ", fx)
             #quadratic kernels (quadratic interpolation b spline kernel)
             w = [
                 0.5 * (1.5 - fx)**2, 0.75 - (fx - 1.0)**2, 0.5 * (fx - 0.5)**2
@@ -439,7 +433,6 @@ class MPMSolver:
             C = ti.Matrix.zero(ti.f32, self.dim, self.dim)
             # Loop over 3x3 grid node neighborhood
             for offset in ti.static(ti.grouped(self.stencil_range())):
-                #print("offset: ", offset)
                 dpos = offset.cast(float) - fx
                 g_v = grid_v_in[base + offset]
                 weight = 1.0
@@ -511,6 +504,7 @@ class MPMSolver:
             else:
                 if ti.static(self.support_plasticity):
                     # Sect 3.1, sand elastoplasticity....???
+                    # Sect 4.3.4 ducker prager projection, not totally certain where the elastoplasticity comes in tho
                     sig = self.sand_projection(sig, p)
                     self.F[p] = U @ sig @ V.transpose()
                     log_sig_sum = 0.0
@@ -542,20 +536,20 @@ class MPMSolver:
         self.last_time_final_particles[None] = self.n_particles[None]
 
     @ti.kernel
-    def p2g(self, dt: ti.f32):
-        ############ SAND
+    def p2g(self, dt: ti.f32, grid_v: ti.template(), grid_m: ti.template(), pid: ti.template(), mat: ti.f32):
         ti.no_activate(self.particle)
         ti.block_dim(256)
         if ti.static(self.use_bls):
             for d in ti.static(range(self.dim)):
-                ti.block_local(self.grid_v_s.get_scalar_field(d))
-            ti.block_local(self.grid_m_s)
+                ti.block_local(grid_v.get_scalar_field(d))
+            ti.block_local(grid_m)
 
-        for I in ti.grouped(self.pid_s):
-            p = self.pid_s[I]
+        for I in ti.grouped(pid):
+            #print("running p2g", mat)
+            p = pid[I]
             #base: grid cell location of the particle in xy(z)
             base = ti.floor(self.x[p] * self.inv_dx - 0.5).cast(int)
-            Im = ti.rescale_index(self.pid_s, self.grid_m_s, I)
+            Im = ti.rescale_index(pid, grid_m, I)
             for D in ti.static(range(self.dim)):
                 # For block shared memory: hint compiler that there is a connection between `base` and loop index `I`
                 base[D] = ti.assume_in_range(base[D], Im[D], 0, 1)
@@ -644,129 +638,22 @@ class MPMSolver:
                     weight *= w[offset[d]][d]
 
                 # Section 4.1 velocity computation, normalization with m_i occuring in grid_normalization_and_gravity
-                self.grid_v_s[base + offset] += weight * (mass * self.v[p] +
+                grid_v[base + offset] += weight * (mass * self.v[p] +
                                                         affine @ dpos)
-                self.grid_m_s[base + offset] += weight * mass
-
-
-        ############ WATER
-        ti.no_activate(self.particle)
-        ti.block_dim(256)
-        if ti.static(self.use_bls):
-            for d in ti.static(range(self.dim)):
-                ti.block_local(self.grid_v_w.get_scalar_field(d))
-            ti.block_local(self.grid_m_w)
-
-        for I in ti.grouped(self.pid_w):
-            p = self.pid_w[I]
-            # base: grid cell location of the particle in xy(z)
-            base = ti.floor(self.x[p] * self.inv_dx - 0.5).cast(int)
-            Im = ti.rescale_index(self.pid_w, self.grid_m_w, I)
-            for D in ti.static(range(self.dim)):
-                # For block shared memory: hint compiler that there is a connection between `base` and loop index `I`
-                base[D] = ti.assume_in_range(base[D], Im[D], 0, 1)
-            #offset within grid cell
-            fx = self.x[p] * self.inv_dx - base.cast(float)
-            # Quadratic kernels  [http://mpm.graphics   Eqn. 123, with x=fx, fx-1,fx-2]
-            w = [0.5 * (1.5 - fx)**2, 0.75 - (fx - 1)**2, 0.5 * (fx - 0.5)**2]
-            # Deformation gradient update
-            F = self.F[p]
-            if self.material[p] == self.material_water:  # liquid
-                F = ti.Matrix.identity(ti.f32, self.dim)
-                if ti.static(self.support_plasticity):
-                    F[0, 0] = self.Jp[p]
-
-            # Sect 4.3.2 where self.C[p] = delta(v_p)
-            F = (ti.Matrix.identity(ti.f32, self.dim) + dt * self.C[p]) @ F
-            # Hardening coefficient: snow gets harder when compressed
-            h = 1.0
-            if ti.static(self.support_plasticity):
-                if self.material[p] != self.material_water:
-                    h = ti.exp(10 * (1.0 - self.Jp[p]))
-            if self.material[p] == self.material_elastic:  # jelly, make it softer
-                h = 0.3
-            mu, la = self.mu_0 * h, self.lambda_0 * h
-            if self.material[p] == self.material_water:  # liquid
-                mu = 0.0
-            U, sig, V = ti.svd(F)
-
-            # Sect 4.3.1, updating discretization of j_w using Eq 12, where sigma = (I + dt * tr(delta(v_p)))
-            # J_w = determinant of deformation gradient, F
-            J = 1.0
-            if self.material[p] != self.material_sand:
-                for d in ti.static(range(self.dim)):
-                    new_sig = sig[d, d]
-                    if self.material[p] == self.material_snow:  # Snow
-                        new_sig = min(max(sig[d, d], 1 - 2.5e-2),
-                                      1 + 4.5e-3)  # Plasticity
-                    if ti.static(self.support_plasticity):
-                        self.Jp[p] *= sig[d, d] / new_sig
-                    sig[d, d] = new_sig
-                    J *= new_sig
-            if self.material[p] == self.material_water:
-                # Reset deformation gradient to avoid numerical instability
-                F = ti.Matrix.identity(ti.f32, self.dim)
-                F[0, 0] = J
-                if ti.static(self.support_plasticity):
-                    self.Jp[p] = J
-            elif self.material[p] == self.material_snow:
-                # Reconstruct elastic deformation gradient after plasticity
-                F = U @ sig @ V.transpose()
-
-            stress = ti.Matrix.zero(ti.f32, self.dim, self.dim)
-
-            if self.material[p] != self.material_sand:
-                stress = 2 * mu * (F - U @ V.transpose()) @ F.transpose(
-                ) + ti.Matrix.identity(ti.f32, self.dim) * la * J * (J - 1)
-            else:
-                if ti.static(self.support_plasticity):
-                    sig = self.sand_projection(sig, p)
-                    F = U @ sig @ V.transpose()
-                    log_sig_sum = 0.0
-                    center = ti.Matrix.zero(ti.f32, self.dim, self.dim)
-                    for i in ti.static(range(self.dim)):
-                        log_sig_sum += ti.log(sig[i, i])
-                        center[i, i] = 2.0 * self.mu_0 * ti.log(
-                            sig[i, i]) * (1 / sig[i, i])
-                    for i in ti.static(range(self.dim)):
-                        center[i,
-                               i] += self.lambda_0 * log_sig_sum * (1 /
-                                                                    sig[i, i])
-                    stress = U @ center @ V.transpose() @ F.transpose()
-            self.F[p] = F
-
-            stress = (-dt * self.p_vol * 4 * self.inv_dx**2) * stress
-            # TODO: implement g2p2g pmass
-            mass = self.p_mass
-            if self.material[p] == self.material_water:
-                mass *= self.water_density
-            affine = stress + mass * self.C[p]
-
-            # Loop over 3x3 grid node neighborhood
-            for offset in ti.static(ti.grouped(self.stencil_range())):
-                dpos = (offset.cast(float) - fx) * self.dx
-                weight = 1.0
-                for d in ti.static(range(self.dim)):
-                    weight *= w[offset[d]][d]
-
-                # Section 4.1 velocity computation, normalization with m_i occuring in grid_normalization_and_gravity
-                self.grid_v_w[base + offset] += weight * (mass * self.v[p] +
-                                                        affine @ dpos)
-                self.grid_m_w[base + offset] += weight * mass
+                grid_m[base + offset] += weight * mass
 
     @ti.kernel
-    def g2p(self, dt: ti.f32):
-
-        ############ SAND
+    def g2p(self, dt: ti.f32, grid_v: ti.template(), grid_m: ti.template(), pid: ti.template(), mat: ti.f32):
         ti.block_dim(256)
         if ti.static(self.use_bls):
             for d in ti.static(range(self.dim)):
-                ti.block_local(self.grid_v_s.get_scalar_field(d))
+                ti.block_local(grid_v.get_scalar_field(d))
         ti.no_activate(self.particle)
-        for I in ti.grouped(self.pid_s):
-            p = self.pid_s[I]
+        for I in ti.grouped(pid):
+            #print("running p2g", mat)
+            p = pid[I]
             base = ti.floor(self.x[p] * self.inv_dx - 0.5).cast(int)
-            Im = ti.rescale_index(self.pid_s, self.grid_m_s, I)
+            Im = ti.rescale_index(pid, grid_m, I)
             for D in ti.static(range(self.dim)):
                 base[D] = ti.assume_in_range(base[D], Im[D], 0, 1)
             fx = self.x[p] * self.inv_dx - base.cast(float)
@@ -778,38 +665,7 @@ class MPMSolver:
             # Loop over 3x3 grid node neighborhood
             for offset in ti.static(ti.grouped(self.stencil_range())):
                 dpos = offset.cast(float) - fx
-                g_v = self.grid_v_s[base + offset]
-                weight = 1.0
-                for d in ti.static(range(self.dim)):
-                    weight *= w[offset[d]][d]
-                new_v += weight * g_v
-                new_C += 4 * self.inv_dx * weight * g_v.outer_product(dpos)
-            if self.material[p] != self.material_stationary:
-                self.v[p], self.C[p] = new_v, new_C
-                self.x[p] += dt * self.v[p]  # advection
-
-        ############ WATER
-        ti.block_dim(256)
-        if ti.static(self.use_bls):
-            for d in ti.static(range(self.dim)):
-                ti.block_local(self.grid_v_w.get_scalar_field(d))
-        ti.no_activate(self.particle)
-        for I in ti.grouped(self.pid_w):
-            p = self.pid_w[I]
-            base = ti.floor(self.x[p] * self.inv_dx - 0.5).cast(int)
-            Im = ti.rescale_index(self.pid_w, self.grid_m_w, I)
-            for D in ti.static(range(self.dim)):
-                base[D] = ti.assume_in_range(base[D], Im[D], 0, 1)
-            fx = self.x[p] * self.inv_dx - base.cast(float)
-            w = [
-                0.5 * (1.5 - fx)**2, 0.75 - (fx - 1.0)**2, 0.5 * (fx - 0.5)**2
-            ]
-            new_v = ti.Vector.zero(ti.f32, self.dim)
-            new_C = ti.Matrix.zero(ti.f32, self.dim, self.dim)
-            # Loop over 3x3 grid node neighborhood
-            for offset in ti.static(ti.grouped(self.stencil_range())):
-                dpos = offset.cast(float) - fx
-                g_v = self.grid_v_w[base + offset]
+                g_v = grid_v[base + offset]
                 weight = 1.0
                 for d in ti.static(range(self.dim)):
                     weight *= w[offset[d]][d]
@@ -1003,7 +859,21 @@ class MPMSolver:
             self.grid_w.deactivate_all()
 
             self.build_pid(self.pid_s, self.pid_w, self.grid_m_s, self.grid_m_w, 0.5)
-            self.p2g(dt)
+
+            water_params = [self.grid_v_w, self.grid_m_w, self.pid_w]
+            sand_params = [self.grid_v_s, self.grid_m_s, self.pid_s]
+            params = [water_params, sand_params]
+
+            #ti.loop_config(parallelize=2, block_dim=16)
+            for i in range(2):
+                parm = params[i]
+                self.p2g(dt, parm[0], parm[1], parm[2], i)
+
+            #Particle to grid for sand
+            #self.p2g(dt, self.grid_v_s, self.grid_m_s, self.pid_s, 0)
+            #Particle to grid for water
+            #self.p2g(dt, self.grid_v_w, self.grid_m_w, self.pid_w, 1)
+
             self.grid_normalization_and_gravity(dt, self.grid_v_s, self.grid_v_w, 
                                                 self.grid_m_s, self.grid_m_w)
             for p in self.grid_postprocess:
@@ -1011,7 +881,16 @@ class MPMSolver:
                 p(self.t, dt, self.grid_v_w)
 
             self.t += dt
-            self.g2p(dt)
+
+            #ti.loop_config(parallelize=2, block_dim=16)
+            for i in range(2):
+                parm = params[i]
+                self.g2p(dt, parm[0], parm[1], parm[2], i)
+
+            #Grid to particle for sand
+            #self.g2p(dt, self.grid_v_s, self.grid_m_s, self.pid_s, 0)
+            #Grid to particle for water
+            #self.g2p(dt, self.grid_v_w, self.grid_m_w, self.pid_w, 1)
 
             cur_frame_velocity = self.compute_max_velocity()
             if smry_writer is not None:
