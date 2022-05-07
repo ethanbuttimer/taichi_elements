@@ -837,51 +837,28 @@ class MPMSolver:
 
     
     @ti.kernel
-    def grid_interaction(self, grid_v_s: ti.template(), grid_v_w: ti.template(), grid_m_s: ti.template(), grid_m_w: ti.template()):
+    def grid_interaction(self, dt: ti.f32, grid_v_s: ti.template(), grid_v_w: ti.template(), grid_m_s: ti.template(), grid_m_w: ti.template()):
     #### UPDATE MOMENTUM / VELOCITY
-        DT = self.default_dt
-        GRAVITY = -1 * 9.8
-
         F = ti.Matrix.identity(ti.f32, 2)
 
         #iterate over grid cells
         for I in ti.grouped(grid_m_s):
-            # f_s = SandParticle.energy_derivative(elastic_deformation)
-            # f_w = WaterParticle.energy_derivative(self.Jp[I], elastic_deformation)
+
             if grid_m_s[I] > 0 and grid_m_w[I] > 0:
                 
-
-                # M = ti.Matrix.zero(ti.f32, 2, 2)
-                # print("grid_m_s[p]", grid_m_s[p])
-                # M[0][0] = grid_m_s[p]
-                # M[1][1] = grid_m_w[p]
                 M = ti.Matrix([[grid_m_s[I], 0],[0, grid_m_w[I]]])
 
                 # i think this was computed diff in the paper
                 C_e = -0.3 * grid_m_w[I]
-                #NOTE: i dont think the same PID corresponds to a particle in the same location on the two different grids.
-                # This may (will) lead to issues
+
                 d_element = C_e * grid_m_s[I] * grid_m_w[I] 
 
-                # D = ti.Matrix.zero(ti.f32, 2, 2)
-                # D[0][0] = -1 * d_element
-                # D[0][1] = d_element
-                # D[1][0] = d_element
-                # D[1][1] = -1 * d_element
-                D = ti.Matrix([[-1 * d_element, d_element],[d_element, -1 * d_element]])
+                D = ti.Matrix([[-1 * d_element, d_element],
+                               [d_element, -1 * d_element]])
 
-                # V = ti.Matrix.zero(ti.f32, 2, 2)
-                # V[0][0] = grid_v_s[I][0]
-                # V[0][1] = grid_v_s[I][1]
-                # V[1][0] = grid_v_w[I][0]
-                # V[1][1] = grid_v_w[I][1]
-                V = ti.Matrix([[grid_v_s[I][0], grid_v_s[I][1]],[grid_v_w[I][0], grid_v_w[I][1]]])
+                V = ti.Matrix([[grid_v_s[I][0], grid_v_s[I][1]],
+                               [grid_v_w[I][0], grid_v_w[I][1]]])
 
-                # G = ti.Matrix.zero(ti.f32, 2, 2)
-                # G[0][0] = 0.0
-                # G[0][1] = -3.0
-                # G[1][0] = 0.0
-                # G[1][1] = -3.0
                 G = ti.Matrix([[0.,-3.],[0.,-3.]])
 
 
@@ -892,21 +869,22 @@ class MPMSolver:
                 # F[0][1] = f_s[1]
                 # F[1][0] = f_w[0]
                 # F[1][1] = f_w[1]
+                # f_s = SandParticle.energy_derivative(elastic_deformation)
+                # f_w = WaterParticle.energy_derivative(self.Jp[I], elastic_deformation)
+                # F = self.F
 
-                #F = self.F
-
-                A = M * DT * D
-                B = M * V + DT * (M * G - F) 
+                A = M * dt * D
+                B = M * V + dt * (M * G - F) 
                 X = A.inverse() * B
                 grid_v_s[I] = ti.Vector([X[0,0], X[0,1]])
                 grid_v_w[I] = ti.Vector([X[1,0], X[1,1]])
         
             elif grid_m_s[I] > 0:
                 f_s = ti.Vector([F[0,0], F[0,1]])
-                grid_v_s[I] = grid_v_s[I] + DT * (GRAVITY - (f_s / grid_m_s[I]))
+                grid_v_s[I] = grid_v_s[I] + dt * (self.gravity[None] - (f_s / grid_m_s[I]))
             elif grid_m_w[I] > 0:
                 f_w = ti.Vector([F[1,0], F[1,1]])
-                grid_v_w[I] = grid_v_w[I] + DT * (GRAVITY - (f_w / grid_m_w[I]))
+                grid_v_w[I] = grid_v_w[I] + dt * (self.gravity[None] - (f_w / grid_m_w[I]))
                 
     #     ## SATURATION
     #     for I in ti.grouped(pid_s):
@@ -997,7 +975,7 @@ class MPMSolver:
 
             #self.overlap_indicator(self.pid_w, self.pid_s)
 
-            #self.grid_interaction(self.grid_v_s, self.grid_v_w, self.grid_m_s, self.grid_m_w)
+            #self.grid_interaction(dt, self.grid_v_s, self.grid_v_w, self.grid_m_s, self.grid_m_w)
 
             self.grid_normalization_and_gravity(dt, self.grid_v_s, self.grid_v_w, 
                                                 self.grid_m_s, self.grid_m_w)
