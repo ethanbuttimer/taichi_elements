@@ -4,6 +4,8 @@ import time
 import numbers
 import math
 import multiprocessing as mp
+from engine.sand_particles import SandParticle
+from engine.wat_particles import WaterParticle
 
 USE_IN_BLENDER = False
 
@@ -38,6 +40,8 @@ class MPMSolver:
         'SLIP': surface_slip,
         'SEPARATE': surface_separate
     }
+
+    GRAV = -9.8
 
     def __init__(
             self,
@@ -174,6 +178,8 @@ class MPMSolver:
         self.grid_m_w = []
         self.pid_w = []
 
+        self.phi_grid = np.array([])
+
         for g in range(self.num_grids):
 ####################### sand
             # Grid node momentum/velocity
@@ -190,10 +196,12 @@ class MPMSolver:
             self.grid_s.append(grid)
 
             def block_component(c):
+                #return #################TODO: REMOVE THIS
                 block.dense(indices, self.leaf_block_size).place(c,
                                                                  offset=offset)
-
+                                                                 
             block_component(grid_m)
+            #print("gridms3: ", self.grid_m_s[0])
             for d in range(self.dim):
                 block_component(grid_v.get_scalar_field(d))
 
@@ -206,6 +214,8 @@ class MPMSolver:
                           1024 * 1024,
                           chunk_size=self.leaf_block_size**self.dim * 8).place(
                               pid, offset=block_offset + (0, ))
+            
+            #print("gridms3: ", self.grid_m_s[0])
 
             
 ####################### water
@@ -250,6 +260,10 @@ class MPMSolver:
         friction_angle = math.radians(45)
         sin_phi = math.sin(friction_angle)
         self.alpha = math.sqrt(2 / 3) * 2 * sin_phi / (3 - sin_phi)
+        #From Sect 3.3
+        n_porosity = 1.
+        k_permeability = 1.
+        c_E_const = n_porosity * n_porosity * self.GRAV / k_permeability
 
         # An empirically optimal chunk size is 1/10 of the expected particle number
         chunk_size = 2**20 if self.dim == 2 else 2**23
@@ -312,7 +326,7 @@ class MPMSolver:
 
         if self.dim == 2:
             self.voxelizer = None
-            self.set_gravity((0, -9.8))
+            self.set_gravity((0, self.GRAV))
         else:
             if use_voxelizer:
                 if USE_IN_BLENDER:
@@ -325,7 +339,7 @@ class MPMSolver:
                                            super_sample=voxelizer_super_sample)
             else:
                 self.voxelizer = None
-            self.set_gravity((0, -9.8, 0))
+            self.set_gravity((0, self.GRAV, 0))
 
         self.voxelizer_super_sample = voxelizer_super_sample
 
@@ -345,6 +359,10 @@ class MPMSolver:
             self.grid_v_w = self.grid_v_w[0]
             self.grid_m_w = self.grid_m_w[0]
             self.pid_w = self.pid_w[0]
+
+        # print("gridms5: ", self.grid_m_s)
+        self.density_frac_grid = ti.field(dtype=ti.f32, shape=self.grid_m_w.shape)
+        # print("dens: ", self.density_frac_grid)
 
     def stencil_range(self):
         return ti.ndrange(*((3, ) * self.dim))
@@ -678,8 +696,10 @@ class MPMSolver:
     @ti.kernel
     def grid_normalization_and_gravity(self, dt: ti.f32, grid_v_s: ti.template(), grid_v_w: ti.template(),
                                        grid_m_s: ti.template(), grid_m_w: ti.template()):
+        #print("norm")
         v_allowed = self.dx * self.g2p2g_allowed_cfl / dt
         for I in ti.grouped(grid_m_s):
+            #print("grid_m_s", grid_m_s[I])
             if grid_m_s[I] > 0:  # No need for epsilon here
                 grid_v_s[I] = (1 / grid_m_s[I]) * grid_v_s[I]  # Momentum to velocity
                 grid_v_s[I] += dt * self.gravity[None]
@@ -815,6 +835,107 @@ class MPMSolver:
             ti.atomic_max(max_velocity, v_max)
         return max_velocity
 
+    
+    @ti.kernel
+    def grid_interaction(self, grid_v_s: ti.template(), grid_v_w: ti.template(), grid_m_s: ti.template(), grid_m_w: ti.template()):
+    #### UPDATE MOMENTUM / VELOCITY
+        DT = self.default_dt
+        GRAVITY = -1 * 9.8
+
+        F = ti.Matrix.identity(ti.f32, 2)
+
+        #iterate over grid cells
+        for I in ti.grouped(grid_m_s):
+            # f_s = SandParticle.energy_derivative(elastic_deformation)
+            # f_w = WaterParticle.energy_derivative(self.Jp[I], elastic_deformation)
+            if grid_m_s[I] > 0 and grid_m_w[I] > 0:
+                
+
+                # M = ti.Matrix.zero(ti.f32, 2, 2)
+                # print("grid_m_s[p]", grid_m_s[p])
+                # M[0][0] = grid_m_s[p]
+                # M[1][1] = grid_m_w[p]
+                M = ti.Matrix([[grid_m_s[I], 0],[0, grid_m_w[I]]])
+
+                # i think this was computed diff in the paper
+                C_e = -0.3 * grid_m_w[I]
+                #NOTE: i dont think the same PID corresponds to a particle in the same location on the two different grids.
+                # This may (will) lead to issues
+                d_element = C_e * grid_m_s[I] * grid_m_w[I] 
+
+                # D = ti.Matrix.zero(ti.f32, 2, 2)
+                # D[0][0] = -1 * d_element
+                # D[0][1] = d_element
+                # D[1][0] = d_element
+                # D[1][1] = -1 * d_element
+                D = ti.Matrix([[-1 * d_element, d_element],[d_element, -1 * d_element]])
+
+                # V = ti.Matrix.zero(ti.f32, 2, 2)
+                # V[0][0] = grid_v_s[I][0]
+                # V[0][1] = grid_v_s[I][1]
+                # V[1][0] = grid_v_w[I][0]
+                # V[1][1] = grid_v_w[I][1]
+                V = ti.Matrix([[grid_v_s[I][0], grid_v_s[I][1]],[grid_v_w[I][0], grid_v_w[I][1]]])
+
+                # G = ti.Matrix.zero(ti.f32, 2, 2)
+                # G[0][0] = 0.0
+                # G[0][1] = -3.0
+                # G[1][0] = 0.0
+                # G[1][1] = -3.0
+                G = ti.Matrix([[0.,-3.],[0.,-3.]])
+
+
+                # TODO: compute forces
+                # F = ti.Matrix.zero(ti.f32, 2, 2)
+                # elastic_deformation = ... # how do we compute this...? 
+                # F[0][0] = f_s[0]
+                # F[0][1] = f_s[1]
+                # F[1][0] = f_w[0]
+                # F[1][1] = f_w[1]
+
+                #F = self.F
+
+                A = M * DT * D
+                B = M * V + DT * (M * G - F) 
+                X = A.inverse() * B
+                grid_v_s[I] = ti.Vector([X[0,0], X[0,1]])
+                grid_v_w[I] = ti.Vector([X[1,0], X[1,1]])
+        
+            elif grid_m_s[I] > 0:
+                f_s = ti.Vector([F[0,0], F[0,1]])
+                grid_v_s[I] = grid_v_s[I] + DT * (GRAVITY - (f_s / grid_m_s[I]))
+            elif grid_m_w[I] > 0:
+                f_w = ti.Vector([F[1,0], F[1,1]])
+                grid_v_w[I] = grid_v_w[I] + DT * (GRAVITY - (f_w / grid_m_w[I]))
+                
+    #     ## SATURATION
+    #     for I in ti.grouped(pid_s):
+    #         p = pid_s[I]
+    #         particle = self.x[p]
+    #         cohesion = 0
+   
+    #         base = ti.floor(self.x[p] * self.inv_dx - 0.5).cast(int)
+    #         Im = ti.rescale_index(pid_s, grid_m_s, I)
+    #         for D in ti.static(range(self.dim)):
+    #             base[D] = ti.assume_in_range(base[D], Im[D], 0, 1)
+    #         fx = self.x[p] * self.inv_dx - base.cast(float)
+
+    #         # code copied from above, unsure if w_s computation is correct...?
+    #         w_s = [
+    #             0.5 * (1.5 - fx)**2, 0.75 - (fx - 1.0)**2, 0.5 * (fx - 0.5)**2
+    #         ]
+
+    #         # Loop over 3x3 grid node neighborhood
+    #         # where does the water information come into play....?
+    #         for offset in ti.static(ti.grouped(self.stencil_range())):
+    #             dpos = offset.cast(float) - fx
+    #             g_v = grid_v_s[base + offset]
+    #             weight = 1.0
+    #             for d in ti.static(range(self.dim)):
+    #                 weight *= w_s[offset[d]][d]
+                
+    #             cohesion += w_s * self.C[p]
+
     def step(self, frame_dt, print_stat=False, smry_writer=None):
         begin_t = time.time()
         begin_substep = self.total_substeps
@@ -874,8 +995,48 @@ class MPMSolver:
             #Particle to grid for water
             #self.p2g(dt, self.grid_v_w, self.grid_m_w, self.pid_w, 1)
 
+            #self.overlap_indicator(self.pid_w, self.pid_s)
+
+            #self.grid_interaction(self.grid_v_s, self.grid_v_w, self.grid_m_s, self.grid_m_w)
+
             self.grid_normalization_and_gravity(dt, self.grid_v_s, self.grid_v_w, 
                                                 self.grid_m_s, self.grid_m_w)
+
+            # construct density array
+
+            #print(self.grid_m_w)
+            # self.temp.copy_from(self.grid_m_s + self.grid_m_w)
+
+            
+            # # # # runs, but is very slow... can't figure out how to do this in terms of scalar fields 
+            # grid_m_s = self.grid_m_s.to_numpy()
+            # grid_m_w = self.grid_m_w.to_numpy()
+            # temp_array = grid_m_s + grid_m_w
+
+            # # phi = 1 if any number of particles exists in the grid, 0 if no particles exist
+            # phi_array = np.where(temp_array != 0.0, 1 / temp_array, 0.0)
+
+            # # 1 when a sand particle exists in the grid cell, else 0
+            # sand_exists = np.where(grid_m_s != 0.0, 1.0, 0.0)
+
+            # # p_w when a sand particle exists in the grid cell, else 0
+            # water_exists = np.where(grid_m_w != 0.0, grid_m_w, 0.0)
+
+            # # phi = p_w / (p_w + p_s) when both sand and water exist in a cell!
+            # density_frac_grid = phi_array * water_exists * sand_exists
+
+            # # Sect 4.3.3. phi grid * density (p_w / p_w + p_s) 
+            # self.density_frac_grid.from_numpy(density_frac_grid)
+
+            # # Sect 4.3.3. phi grid (1 if both particles exist, else 0)
+            # self.phi_grid = water_exists * sand_exists
+
+            # # Compute saturation for each sand particle
+            # w_s = np.array([]) 
+            # # phi_p_s = np.sum(w_s @ self.phi_grid)
+
+            
+
             for p in self.grid_postprocess:
                 p(self.t, dt, self.grid_v_s)
                 p(self.t, dt, self.grid_v_w)
