@@ -56,7 +56,6 @@ class MPMSolver:
             dt_scale=1,
             E_scale=1,
             voxelizer_super_sample=2,
-            use_g2p2g=False,  # Ref: A massively parallel and scalable multi-GPU material point method
             v_clamp_g2p2g=True,
             use_bls=True,
             g2p2g_allowed_cfl=0.9,  # 0.0 for no CFL limit
@@ -68,7 +67,6 @@ class MPMSolver:
     ):
         self.dim = len(res)
         self.quant = quant
-        self.use_g2p2g = use_g2p2g
         self.v_clamp_g2p2g = v_clamp_g2p2g
         self.use_bls = use_bls
         self.g2p2g_allowed_cfl = g2p2g_allowed_cfl
@@ -101,8 +99,8 @@ class MPMSolver:
         self.F_bound = 4.0
 
         # Affine velocity field
-        if not self.use_g2p2g:
-            self.C = ti.Matrix.field(self.dim, self.dim, dtype=ti.f32)
+        self.C = ti.Matrix.field(self.dim, self.dim, dtype=ti.f32)
+
         # Deformation gradient
 
         if quant:
@@ -159,8 +157,6 @@ class MPMSolver:
         offset = tuple(-self.grid_size // 2 for _ in range(self.dim))
         self.offset = offset
 
-        self.num_grids = 2 if self.use_g2p2g else 1
-
         grid_block_size = 128
         if self.dim == 2:
             self.leaf_block_size = 16
@@ -170,67 +166,66 @@ class MPMSolver:
 
         self.phi_grid = np.array([])
 
-        for g in range(self.num_grids):
 ####################### sand
-            # Grid node momentum/velocity
-            self.grid_v_s = ti.Vector.field(self.dim, dtype=ti.f32)
-            self.grid_m_s = ti.field(dtype=ti.f32)
-            # Grid node mass
-            grid = ti.root.pointer(indices, self.grid_size // grid_block_size)
-            block = grid.pointer(indices,
-                                 grid_block_size // self.leaf_block_size)
-            self.block_s = block
-            self.grid_s = grid
+        # Grid node momentum/velocity
+        self.grid_v_s = ti.Vector.field(self.dim, dtype=ti.f32)
+        self.grid_m_s = ti.field(dtype=ti.f32)
+        # Grid node mass
+        grid = ti.root.pointer(indices, self.grid_size // grid_block_size)
+        block = grid.pointer(indices,
+                                grid_block_size // self.leaf_block_size)
+        self.block_s = block
+        self.grid_s = grid
 
-            #self.grid_f_s = ti.Vector.field(self.dim, dtype=ti.f32)
-            def block_component(c):
-                #return #################TODO: REMOVE THIS
-                block.dense(indices, self.leaf_block_size).place(c,
-                                                                 offset=offset)
-                                                                 
-            block_component(self.grid_m_s)
-            #print("gridms3: ", self.grid_m_s[0])
-            for d in range(self.dim):
-                block_component(self.grid_v_s.get_scalar_field(d))
+        #self.grid_f_s = ti.Vector.field(self.dim, dtype=ti.f32)
+        def block_component(c):
+            #return #################TODO: REMOVE THIS
+            block.dense(indices, self.leaf_block_size).place(c,
+                                                                offset=offset)
+                                                                
+        block_component(self.grid_m_s)
+        #print("gridms3: ", self.grid_m_s[0])
+        for d in range(self.dim):
+            block_component(self.grid_v_s.get_scalar_field(d))
 
-            self.pid_s = ti.field(ti.i32)
+        self.pid_s = ti.field(ti.i32)
 
-            block_offset = tuple(o // self.leaf_block_size
-                                 for o in self.offset)
-            self.block_offset = block_offset
-            block.dynamic(ti.axes(self.dim),
-                          1024 * 1024,
-                          chunk_size=self.leaf_block_size**self.dim * 8).place(
-                              self.pid_s, offset=block_offset + (0, ))
-            
-            #print("gridms3: ", self.grid_m_s[0])
+        block_offset = tuple(o // self.leaf_block_size
+                                for o in self.offset)
+        self.block_offset = block_offset
+        block.dynamic(ti.axes(self.dim),
+                        1024 * 1024,
+                        chunk_size=self.leaf_block_size**self.dim * 8).place(
+                            self.pid_s, offset=block_offset + (0, ))
+        
+        #print("gridms3: ", self.grid_m_s[0])
 
-            
+        
 ####################### water
-            self.grid_v_w = ti.Vector.field(self.dim, dtype=ti.f32)
-            self.grid_m_w = ti.field(dtype=ti.f32)
-            
-            grid = ti.root.pointer(indices, self.grid_size // grid_block_size)
-            block = grid.pointer(indices,
-                                 grid_block_size // self.leaf_block_size)
-            self.block = block
-            self.grid_w = grid
+        self.grid_v_w = ti.Vector.field(self.dim, dtype=ti.f32)
+        self.grid_m_w = ti.field(dtype=ti.f32)
+        
+        grid = ti.root.pointer(indices, self.grid_size // grid_block_size)
+        block = grid.pointer(indices,
+                                grid_block_size // self.leaf_block_size)
+        self.block = block
+        self.grid_w = grid
 
-            #self.grid_f_w = ti.Vector.field(self.dim, dtype=ti.f32)
+        #self.grid_f_w = ti.Vector.field(self.dim, dtype=ti.f32)
 
-            block_component(self.grid_m_w)
-            for d in range(self.dim):
-                block_component(self.grid_v_w.get_scalar_field(d))
+        block_component(self.grid_m_w)
+        for d in range(self.dim):
+            block_component(self.grid_v_w.get_scalar_field(d))
 
-            self.pid_w = ti.field(ti.i32)
+        self.pid_w = ti.field(ti.i32)
 
-            block_offset = tuple(o // self.leaf_block_size
-                                 for o in self.offset)
-            self.block_offset = block_offset
-            block.dynamic(ti.axes(self.dim),
-                          1024 * 1024,
-                          chunk_size=self.leaf_block_size**self.dim * 8).place(
-                              self.pid_w, offset=block_offset + (0, ))
+        block_offset = tuple(o // self.leaf_block_size
+                                for o in self.offset)
+        self.block_offset = block_offset
+        block.dynamic(ti.axes(self.dim),
+                        1024 * 1024,
+                        chunk_size=self.leaf_block_size**self.dim * 8).place(
+                            self.pid_w, offset=block_offset + (0, ))
 
             
 
@@ -257,8 +252,7 @@ class MPMSolver:
         self.particle = ti.root.dynamic(ti.i, max_num_particles, chunk_size)
 
         if self.quant:
-            if not self.use_g2p2g:
-                self.particle.place(self.C)
+            self.particle.place(self.C)
             if self.support_plasticity:
                 self.particle.place(self.Jp)
             self.particle.bit_struct(num_bits=64).place(self.x)
@@ -302,8 +296,7 @@ class MPMSolver:
                                 self.color)
             if self.support_plasticity:
                 self.particle.place(self.Jp)
-            if not self.use_g2p2g:
-                self.particle.place(self.C)
+            self.particle.place(self.C)
 
         if self.use_ggui:
             self.particle.place(self.color_with_alpha)
@@ -539,7 +532,7 @@ class MPMSolver:
     def grid_normalization_and_gravity(self, dt: ti.f32, grid_v_s: ti.template(), grid_v_w: ti.template(),
                                        grid_m_s: ti.template(), grid_m_w: ti.template()):
         ########################
-        # F = ti.Matrix.identity(ti.f32, 2)
+        # 
         # for I in ti.grouped(grid_m_s):
         #     f_s = ti.Vector([F[0,0], F[0,1]])
         #     # print('before')
@@ -553,27 +546,31 @@ class MPMSolver:
         #     # self.grid_v_s[I] = self.grid_v_s[I] + dt * (self.gravity[None] - (f_s / self.grid_m_s[I]))
         ###############################
         #print("norm")
+        
+        F = ti.Matrix.identity(ti.f32, 2)
+        G = ti.Matrix([[0.,-3.],[0.,-3.]])
+
         v_allowed = self.dx * self.g2p2g_allowed_cfl / dt
+
         for I in ti.grouped(grid_m_s):
             #print("grid_m_s", grid_m_s[I])
-            if grid_m_s[I] > 0:  # No need for epsilon here
+            if grid_m_s[I] > 0 and grid_m_w[I] > 0:
+                print("both")
+                grid_v_s[I] = ti.Vector([0.,0.])
+                grid_v_w[I] = ti.Vector([0.,0.])
+            elif grid_m_s[I] > 0:  # No need for epsilon here
+                print("sand")
                 grid_v_s[I] = (1 / grid_m_s[I]) * grid_v_s[I]  # Momentum to velocity
                 grid_v_s[I] += dt * self.gravity[None]
-
-            # Grid velocity clamping
-            if ti.static(self.g2p2g_allowed_cfl > 0 and self.use_g2p2g
-                         and self.v_clamp_g2p2g):
-                grid_v_s[I] = min(max(grid_v_s[I], -v_allowed), v_allowed)
-
-        for I in ti.grouped(grid_m_w):
-            if grid_m_w[I] > 0:  # No need for epsilon here
+            elif grid_m_w[I] > 0:  # No need for epsilon here
+                print("water")
                 grid_v_w[I] = (1 / grid_m_w[I]) * grid_v_w[I]  # Momentum to velocity
                 grid_v_w[I] += dt * self.gravity[None]
 
             # Grid velocity clamping
-            if ti.static(self.g2p2g_allowed_cfl > 0 and self.use_g2p2g
-                         and self.v_clamp_g2p2g):
+            if ti.static(self.g2p2g_allowed_cfl > 0 and self.v_clamp_g2p2g):
                 grid_v_w[I] = min(max(grid_v_w[I], -v_allowed), v_allowed)
+                grid_v_s[I] = min(max(grid_v_s[I], -v_allowed), v_allowed)
 
     @ti.kernel
     def grid_bounding_box(self, t: ti.f32, dt: ti.f32,
@@ -696,6 +693,7 @@ class MPMSolver:
     def grid_interaction(self, dt: ti.f32, grid_v_s: ti.template(), grid_v_w: ti.template(), grid_m_s: ti.template(), grid_m_w: ti.template()):
     #### UPDATE MOMENTUM / VELOCITY
         F = ti.Matrix.identity(ti.f32, 2)
+        G = ti.Matrix([[0.,-3.],[0.,-3.]])
 
         #iterate over grid cells
         for I in ti.grouped(grid_m_s):
@@ -715,7 +713,7 @@ class MPMSolver:
                 V = ti.Matrix([[grid_v_s[I][0], grid_v_s[I][1]],
                                [grid_v_w[I][0], grid_v_w[I][1]]])
 
-                G = ti.Matrix([[0.,-3.],[0.,-3.]])
+                
 
 
                 # TODO: compute forces
@@ -735,18 +733,13 @@ class MPMSolver:
                 X = A.inverse() * B
 
                 # print("setting v")
-                # grid_v_s[I] = ti.Vector([0., 1.])
 
                 # print(inv[0,0], inv[1,0], inv[1,1])
 
-                # if X[0][0] == ti.inf:
-                #print(X[0][0]) #, type(X[0][0]))
-
-                a = 1.0 #X[0,0] #100.0
                 b = 1.0# X[1,0]
                 c = 1.0# X[1,1]
                 # print('before')
-                grid_v_s[I] = ti.Vector([a,X[0,1]])
+                grid_v_s[I] = ti.Vector([X[0,0],X[0,1]])
                 # print("after")
                 # grid_v_w[I] = ti.Vector([b, c])
         
@@ -802,31 +795,11 @@ class MPMSolver:
             #print('.', end='', flush=True)
             self.total_substeps += 1
             if self.use_adaptive_dt:
-                # if self.use_g2p2g:
-                #     max_grid_v = self.compute_max_grid_velocity(
-                #         self.grid_v_s[self.input_grid])
-                # else:
                 max_grid_v = max(self.compute_max_grid_velocity(self.grid_v_s), self.compute_max_grid_velocity(self.grid_v_w)) ###TODO: confirm... that this is correct? 
                 cfl_dt = self.g2p2g_allowed_cfl * self.dx / (max_grid_v + 1e-6)
                 dt = min(dt, cfl_dt, frame_time_left)
             frame_time_left -= dt
 
-            # if self.use_g2p2g:
-            #     output_grid = 1 - self.input_grid
-            #     self.grid[output_grid].deactivate_all()
-            #     self.build_pid(self.pid[self.input_grid], 
-            #                    self.grid_m[self.input_grid], 0.5)
-            #     self.g2p2g(dt, self.pid[self.input_grid],
-            #                self.grid_v[self.input_grid],
-            #                self.grid_v[output_grid], self.grid_m[output_grid])
-            #     self.grid_normalization_and_gravity(dt,
-            #                                         self.grid_v[output_grid],
-            #                                         self.grid_m[output_grid])
-            #     for p in self.grid_postprocess:
-            #         p(self.t, dt, self.grid_v[output_grid])
-            #     self.input_grid = output_grid
-            #     self.t += dt
-            # else:
             self.grid_s.deactivate_all()
             self.grid_w.deactivate_all()
 
@@ -848,7 +821,7 @@ class MPMSolver:
 
             #self.overlap_indicator(self.pid_w, self.pid_s)
 
-            self.grid_interaction(dt, self.grid_v_s, self.grid_v_w, self.grid_m_s, self.grid_m_w)
+            #self.grid_interaction(dt, self.grid_v_s, self.grid_v_w, self.grid_m_s, self.grid_m_w)
 
             #print('where is error')
 

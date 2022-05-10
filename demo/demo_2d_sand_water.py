@@ -21,7 +21,7 @@ write_to_disk = args.out_dir is not None
 if write_to_disk:
     os.mkdir(f'{args.out_dir}')
 
-ti.init(arch=ti.cuda)  # Try to run on GPU
+ti.init(arch=ti.cuda)#, advanced_optimization=False)#, device_memory_fraction=0.3)  # Try to run on GPU
 
 gui = ti.GUI("Taichi Elements", res=1024, background_color=0x112F41)
 
